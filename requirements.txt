@@ -1,0 +1,22 @@
+# --- Core Server ---
+flask
+flask-cors
+xhtml2pdf
+
+# --- LangChain Ecosystem ---
+langchain
+langchain-core
+langchain-community
+langchain-ollama
+sqlalchemy
+sqlite-utils
+
+# --- PDF & Utilities ---
+pydantic
+python-dateutil
+
+# --- Optional (useful for testing / local dev) ---
+requests
+faker
+matplotlib
+pandas
