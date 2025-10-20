@@ -116,7 +116,7 @@ def save_chart(df: pd.DataFrame, chart_type: str, x: str, y: str, title: str):
         plt.close()
 
 # ---------------------- LLM ----------------------
-llm = OllamaLLM(model="llama3", temperature=0.2)
+llm = OllamaLLM(model="qwen2.5:14b-instruct-q4_K_M", temperature=0.2)
 
 def schema_text():
     conn = get_db()
