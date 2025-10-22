@@ -20,3 +20,4 @@ requests
 faker
 matplotlib
 pandas
+gunicorn

@@ -5,8 +5,11 @@ from datetime import datetime
 DB_PATH = "chat_history.db"
 fake = Faker("en_IN")
 
+# ============================================================
+#  CREATE SCHEMA
+# ============================================================
 def create_schema():
-    """Create all tables."""
+    """Create all tables, including schema_descriptions."""
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)  # reset for clean schema
 
@@ -52,14 +55,24 @@ def create_schema():
         status TEXT,
         disbursed TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS schema_descriptions (
+        table_name TEXT NOT NULL,
+        column_name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        PRIMARY KEY (table_name, column_name)
+    );
     """)
     conn.commit()
     conn.close()
-    print("✅ Schema created successfully.")
+    print("✅ Schema created successfully (with schema_descriptions).")
 
 
+# ============================================================
+#  SEED DUMMY DATA
+# ============================================================
 def seed_data(customers=50, loans=150):
-    """Populate fake data."""
+    """Populate fake data for demo."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
@@ -96,6 +109,66 @@ def seed_data(customers=50, loans=150):
     print("✅ Dummy data seeded successfully.")
 
 
+# ============================================================
+#  POPULATE SCHEMA DESCRIPTIONS
+# ============================================================
+def seed_schema_descriptions():
+    """Add human-readable descriptions for all tables and columns."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    descriptions = [
+        # --- Customers table ---
+        ("customers", "id", "Unique ID for each customer"),
+        ("customers", "name", "Full name of the customer"),
+        ("customers", "city", "City where the customer resides"),
+        ("customers", "age", "Age of the customer"),
+        ("customers", "segment", "Customer segment type — Retail, Corporate, or SME"),
+
+        # --- Loans table ---
+        ("loans", "id", "Unique loan ID"),
+        ("loans", "customer_id", "Foreign key linking to customers.id"),
+        ("loans", "branch", "Branch name where the loan was issued"),
+        ("loans", "amount", "Loan amount sanctioned in INR"),
+        ("loans", "interest", "Interest rate applied to the loan"),
+        ("loans", "status", "Loan repayment status: active, closed, overdue, or NPA"),
+        ("loans", "disbursed", "Date the loan was disbursed"),
+
+        # --- Reports table ---
+        ("reports", "id", "Unique ID for each generated report"),
+        ("reports", "session_id", "Associated chat session ID"),
+        ("reports", "prompt", "User prompt that triggered this report"),
+        ("reports", "pdf_path", "Path to the generated PDF report"),
+        ("reports", "created_at", "Timestamp when report was generated"),
+
+        # --- Sessions table ---
+        ("sessions", "id", "Unique ID for each chat session"),
+        ("sessions", "created_at", "Session creation timestamp"),
+
+        # --- Messages table ---
+        ("messages", "id", "Unique message ID"),
+        ("messages", "session_id", "Chat session to which the message belongs"),
+        ("messages", "role", "Sender role: user or assistant"),
+        ("messages", "content", "Message content text"),
+        ("messages", "type", "Optional content type, e.g., query or report"),
+        ("messages", "created_at", "Timestamp of the message"),
+    ]
+
+    cur.executemany("""
+        INSERT OR REPLACE INTO schema_descriptions (table_name, column_name, description)
+        VALUES (?, ?, ?)
+    """, descriptions)
+
+    conn.commit()
+    conn.close()
+    print("📘 schema_descriptions table populated successfully.")
+
+
+# ============================================================
+#  MAIN EXECUTION
+# ============================================================
 if __name__ == "__main__":
     create_schema()
     seed_data()
+    seed_schema_descriptions()
+    print("✅ Database setup complete with descriptive schema.")
