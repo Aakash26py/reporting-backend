@@ -1,15 +1,16 @@
-# llm_logic.py
+# llm_logic.py (OpenAI version)
 import json, re, traceback, logging
 from typing import Any, Dict, List, Optional, Tuple
-
-from langchain_ollama import ChatOllama
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
 import os
 
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
 load_dotenv()
 MODEL = os.getenv("MODEL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 log = logging.getLogger("chat")
 
@@ -45,8 +46,18 @@ class LlmOrchestrator:
         answer_temperature: float = 0.3,
         num_ctx: int = 8192,
     ):
-        self.llm_sql = ChatOllama(model=sql_model, temperature=sql_temperature, num_ctx=num_ctx)
-        self.llm_answer = ChatOllama(model=answer_model, temperature=answer_temperature, num_ctx=num_ctx)
+        self.llm_sql = ChatOpenAI(
+            model=sql_model,
+            temperature=sql_temperature,
+            max_tokens=None,
+            api_key=OPENAI_API_KEY
+        )
+        self.llm_answer = ChatOpenAI(
+            model=answer_model,
+            temperature=answer_temperature,
+            max_tokens=None,
+            api_key=OPENAI_API_KEY
+        )
         self.parser = StrOutputParser()
 
         self.sql_chain = self._build_sql_chain()
@@ -130,9 +141,6 @@ class LlmOrchestrator:
         validate_fn,
         trace_fn
     ) -> Tuple[str, Optional[str]]:
-        """
-        Returns (final_sql, err). Retries up to 4 times with feedback.
-        """
         context_json = json.dumps(context_obj or {}, ensure_ascii=False)
         validator_feedback = ""
         last_sql = ""

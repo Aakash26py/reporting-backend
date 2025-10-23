@@ -1,5 +1,6 @@
+# reports_app.py (OpenAI version with HTML saving + SQL debug logging)
 from flask import Blueprint, request, jsonify, send_file
-import os, re, io, json, time, threading, sqlite3
+import os, re, io, json, time, threading, sqlite3, logging
 from datetime import datetime
 
 # Matplotlib MUST be headless before importing pyplot
@@ -9,24 +10,34 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from xhtml2pdf import pisa
-from langchain_ollama import OllamaLLM
-
-from schema_context import get_schema_context  # ✅ New import
+from dotenv import load_dotenv
+from schema_context import get_schema_context  # ✅ Import schema context
 
 # ---------------------- CONFIG ----------------------
 report_bp = Blueprint("reports", __name__)
 DB_PATH = "chat_history.db"
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 REPORTS_DIR = os.path.join(BASE_DIR, "reports")
-CHARTS_DIR  = os.path.join(BASE_DIR, "report_charts")
+CHARTS_DIR = os.path.join(BASE_DIR, "report_charts")
+HTML_DIR = os.path.join(BASE_DIR, "report_html")  # ✅ folder for raw HTML
 os.makedirs(REPORTS_DIR, exist_ok=True)
 os.makedirs(CHARTS_DIR, exist_ok=True)
+os.makedirs(HTML_DIR, exist_ok=True)
 
-from dotenv import load_dotenv
 load_dotenv()
-MODEL = os.getenv("MODEL")
+MODEL = os.getenv("MODEL", "gpt-4o-mini")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 REPORT_STATUS = {}
+
+# ---------------------- LOGGING ----------------------
+log = logging.getLogger("reports")
+if not log.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+log.setLevel(logging.INFO)
 
 # ---------------------- DB & UTILS ----------------------
 def get_db():
@@ -62,7 +73,7 @@ def link_callback(uri, rel):
         return uri.replace("file://", "")
     if os.path.isabs(uri):
         return uri
-    for root in (CHARTS_DIR, REPORTS_DIR, BASE_DIR):
+    for root in (CHARTS_DIR, REPORTS_DIR, HTML_DIR, BASE_DIR):
         cand = os.path.join(root, uri)
         if os.path.exists(cand):
             return cand
@@ -103,13 +114,25 @@ def save_chart(df: pd.DataFrame, chart_type: str, x: str, y: str, title: str):
     finally:
         plt.close()
 
-# ---------------------- LLM ----------------------
-llm = OllamaLLM(model=MODEL, temperature=0.2)
+# ---------------------- LLM (OpenAI version) ----------------------
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+llm = ChatOpenAI(model=MODEL, temperature=0.2, api_key=OPENAI_API_KEY)
+parser = StrOutputParser()
+
+def call_llm(prompt_text: str):
+    """Send a plain text prompt and return response string."""
+    prompt = ChatPromptTemplate.from_messages([("human", "{text}")])
+    chain = prompt | llm | parser
+    return chain.invoke({"text": prompt_text}).strip()
 
 # ---------------------- CORE ----------------------
 def generate_report_background(report_id: int, topic: str):
     try:
         REPORT_STATUS[report_id] = {"ready": False, "stage": "planning", "message": "Planning report…"}
+        log.info(f"[{report_id}] Starting report for topic: {topic}")
 
         schema_ctx = get_schema_context()
         schema_text = schema_ctx["schema_text"]
@@ -126,8 +149,7 @@ Goal:
 - Identify up to 5 meaningful financial metrics and 5-6 analytical charts related to this topic.
 - Each metric or chart must be based on valid SQL queries that use ONLY columns from the schema.
 - Prefer joins between loans and customers when analyzing customers or branches.
-- Use realistic column names (e.g., loans.amount, customers.name).
-- Each chart must include: title, sql, x, y, type, and a descriptive paragraph ("insight").
+- Always alias the horizontal axis as 'x' and the numeric/metric column as 'y'.
 - Chart types allowed: bar, line, pie, area.
 
 Return JSON format ONLY:
@@ -147,8 +169,9 @@ Return JSON format ONLY:
   ]
 }}
 """
+        plan_raw = call_llm(planner_prompt)
+        log.info(f"[{report_id}] Raw plan output:\n{plan_raw}")
 
-        plan_raw = llm.invoke(planner_prompt).strip()
         plan_raw = plan_raw.replace("```json", "").replace("```", "").strip()
         if not plan_raw.startswith("{"):
             plan_raw = plan_raw[plan_raw.find("{"):]
@@ -164,32 +187,52 @@ Return JSON format ONLY:
 
         conn = get_db()
         metrics, charts = [], []
+
+        # ---------- METRICS ----------
         for m in plan.get("metrics", []):
             title, sql = m.get("title"), m.get("sql")
+            log.info(f"[{report_id}] Running metric SQL: {sql}")
             try:
                 df = pd.read_sql_query(sql, conn)
                 val = df.iloc[0, 0] if not df.empty else 0
                 metrics.append({"title": title, "value_short": inr_short(val), "value_full": inr_full(val)})
             except Exception as e:
+                log.error(f"[{report_id}] Metric SQL failed ({title}): {e}")
                 metrics.append({"title": title, "value_short": "Error", "value_full": str(e)})
 
+        # ---------- CHARTS ----------
         for c in plan.get("charts", []):
             title, sql = c.get("title"), c.get("sql")
-            x, y, chart_type = c.get("x"), c.get("y"), c.get("type", "bar")
+            x, y, chart_type = c.get("x") or "x", c.get("y") or "y", c.get("type", "bar")
             insight = c.get("insight", "")
+            log.info(f"[{report_id}] Chart '{title}' | SQL: {sql}")
             try:
                 df = pd.read_sql_query(sql, conn)
+                log.info(f"[{report_id}] Chart '{title}' returned {len(df)} rows, columns: {list(df.columns)}")
+
+                # Try to auto-detect x/y if not found
                 if x not in df.columns or y not in df.columns:
+                    if len(df.columns) >= 2:
+                        x, y = df.columns[0], df.columns[1]
+                        log.warning(f"[{report_id}] Auto-detected x='{x}', y='{y}' for '{title}'")
+                    else:
+                        log.warning(f"[{report_id}] Skipped '{title}' (missing x/y columns)")
+                        continue
+
+                if df.empty:
+                    log.warning(f"[{report_id}] Skipped '{title}' (empty dataframe)")
                     continue
+
                 img_path = save_chart(df, chart_type, x, y, title)
                 charts.append({"title": title, "img_path": img_path, "insight": insight})
             except Exception as e:
+                log.error(f"[{report_id}] Chart '{title}' failed: {e}")
                 charts.append({"title": f"{title} (failed)", "error": str(e)})
         conn.close()
 
         REPORT_STATUS[report_id] = {"ready": False, "stage": "writing", "message": "Writing PDF…"}
 
-        # Executive summary
+        # ---------- EXECUTIVE SUMMARY ----------
         metric_summary = "\n".join([f"- {m['title']}: {m['value_full']}" for m in metrics])
         summary_prompt = f"""
 You are a senior banking executive.
@@ -198,11 +241,15 @@ Use INR values and refer to branches or trends if relevant.
 Metrics summary:
 {metric_summary}
 """
-        executive = llm.invoke(summary_prompt).strip()
+        executive = call_llm(summary_prompt)
+        log.info(f"[{report_id}] Executive summary generated.")
 
-        # Build PDF
+        # ---------- BUILD HTML ----------
         def metrics_html(items):
-            return "".join([f"<div class='card'><div class='card-title'>{m['title']}</div><div class='card-value'>{m['value_short']}</div></div>" for m in items])
+            return "".join([
+                f"<div class='card'><div class='card-title'>{m['title']}</div><div class='card-value'>{m['value_short']}</div></div>"
+                for m in items
+            ])
 
         def charts_html(items):
             html = ""
@@ -238,22 +285,43 @@ Metrics summary:
         <p style='font-size:9pt;color:#888;text-align:center;'>Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
         </body></html>"""
 
-        filename = f"report_{int(time.time())}.pdf"
-        pdf_path = save_pdf(html, filename)
+        # ---------- SAVE HTML + PDF ----------
+        timestamp = int(time.time())
+        html_filename = f"report_{timestamp}.html"
+        pdf_filename = f"report_{timestamp}.pdf"
+
+        html_path = os.path.join(HTML_DIR, html_filename)
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html)
+
+        pdf_path = save_pdf(html, pdf_filename)
+        log.info(f"[{report_id}] Saved HTML: {html_path}")
+        log.info(f"[{report_id}] Saved PDF: {pdf_path}")
 
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("INSERT INTO reports (prompt, pdf_path, created_at) VALUES (?,?,?)",
-                    (topic, os.path.abspath(pdf_path), datetime.now().isoformat()))
-        conn.commit(); conn.close()
+        try:
+            cur.execute("ALTER TABLE reports ADD COLUMN html_path TEXT")
+        except Exception:
+            pass
+        cur.execute(
+            "INSERT INTO reports (prompt, pdf_path, html_path, created_at) VALUES (?,?,?,?)",
+            (topic, os.path.abspath(pdf_path), os.path.abspath(html_path), datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
 
         REPORT_STATUS[report_id] = {
             "ready": True,
-            "url": f"http://localhost:8004/reports/{filename}",
+            "url_pdf": f"http://localhost:8004/reports/{pdf_filename}",
+            "url_html": f"http://localhost:8004/html/{html_filename}",
             "topic": topic
         }
 
+        log.info(f"[{report_id}] Report generation complete ✅")
+
     except Exception as e:
+        log.exception(f"[{report_id}] Report generation failed: {e}")
         REPORT_STATUS[report_id] = {"error": str(e)}
 
 # ---------------------- ROUTES ----------------------
@@ -276,11 +344,35 @@ def report_status(rid):
 def serve_report(filename):
     return send_file(os.path.join(REPORTS_DIR, filename), as_attachment=True)
 
+@report_bp.route("/html/<path:filename>")
+def serve_html(filename):
+    return send_file(os.path.join(HTML_DIR, filename))
+
 @report_bp.route("/reports_list")
 def reports_list():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT prompt,pdf_path,created_at FROM reports ORDER BY id DESC")
-    rows = [{"prompt": r[0], "url": f"http://localhost:8004/reports/{os.path.basename(r[1])}", "created_at": r[2]} for r in cur.fetchall()]
-    conn.close()
+    try:
+        cur.execute("SELECT prompt,pdf_path,html_path,created_at FROM reports ORDER BY id DESC")
+        rows = [
+            {
+                "prompt": r[0],
+                "pdf_url": f"http://localhost:8004/reports/{os.path.basename(r[1])}",
+                "html_url": f"http://localhost:8004/html/{os.path.basename(r[2])}" if r[2] else None,
+                "created_at": r[3]
+            }
+            for r in cur.fetchall()
+        ]
+    except sqlite3.OperationalError:
+        cur.execute("SELECT prompt,pdf_path,created_at FROM reports ORDER BY id DESC")
+        rows = [
+            {
+                "prompt": r[0],
+                "pdf_url": f"http://localhost:8004/reports/{os.path.basename(r[1])}",
+                "created_at": r[2]
+            }
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
     return jsonify(rows)

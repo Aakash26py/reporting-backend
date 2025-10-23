@@ -21,3 +21,5 @@ faker
 matplotlib
 pandas
 gunicorn
+langchain-openai
+openai
