@@ -13,8 +13,19 @@ chat_bp = Blueprint("chat", __name__)
 CORS(chat_bp)
 
 DB_PATH = "chat_history.db"
-logging.basicConfig(level=logging.INFO)
+import sys
 log = logging.getLogger("chat")
+
+# ensure chat logger uses same stdout handler as main
+if not log.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+
+log.setLevel(logging.INFO)
+log.propagate = True
+
 
 load_dotenv()
 MODEL = os.getenv("MODEL")
