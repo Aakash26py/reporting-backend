@@ -147,7 +147,7 @@ User topic: "{topic}"
 
 Goal:
 - Identify up to 5 meaningful financial metrics and 5-6 analytical charts related to this topic.
-- Each metric or chart must be based on valid SQL queries that use ONLY columns from the schema.
+- Each metric or chart must be based on valid SQLite queries that use ONLY columns from the schema.
 - Prefer joins between loans and customers when analyzing customers or branches.
 - Always alias the horizontal axis as 'x' and the numeric/metric column as 'y'.
 - Chart types allowed: bar, line, pie, area.
